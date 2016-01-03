@@ -34,6 +34,7 @@ type Plan struct {
 	Rule *Rule
 
 	Criteria sqlparser.SQLNode
+	keyIndex int //used for insert/replace to find shard key idx
 
 	TableIndexs      []int //value is table index
 	RouteTableIndexs []int
@@ -311,9 +312,14 @@ func (plan *Plan) getTableIndexsByTuple(valExpr sqlparser.ValExpr) ([]int, error
 
 func (plan *Plan) getInsertTableIndex(vals sqlparser.Values) (int, error) {
 	index := -1
+
 	for i := 0; i < len(vals); i++ {
-		first_value_expression := vals[i].(sqlparser.ValTuple)[0]
-		newIndex, err := plan.getTableIndexByValue(first_value_expression)
+		first_value_expression := vals[i].(sqlparser.ValTuple)
+		if len(first_value_expression) < (plan.keyIndex + 1) {
+			return 0, errors.ErrColsLenNotMatch
+		}
+
+		newIndex, err := plan.getTableIndexByValue(first_value_expression[plan.keyIndex])
 		if err != nil {
 			return -1, err
 		}
@@ -324,6 +330,27 @@ func (plan *Plan) getInsertTableIndex(vals sqlparser.Values) (int, error) {
 		}
 	}
 	return index, nil
+}
+
+// find shard key index in insert or replace SQL
+// plan.Rule cols must not nil
+func (plan *Plan) GetIRKeyIndex(cols sqlparser.Columns) error {
+	if plan.Rule == nil {
+		return errors.ErrNoPlanRule
+	}
+	plan.keyIndex = -1
+	for i, _ := range cols {
+		colname := string(cols[i].(*sqlparser.NonStarExpr).Expr.(*sqlparser.ColName).Name)
+
+		if colname == plan.Rule.Key {
+			plan.keyIndex = i
+			break
+		}
+	}
+	if plan.keyIndex == -1 {
+		return errors.ErrIRNoShardingKey
+	}
+	return nil
 }
 
 func (plan *Plan) getTableIndexByValue(valExpr sqlparser.ValExpr) (int, error) {

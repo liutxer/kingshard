@@ -226,7 +226,9 @@ func (r *Router) BuildPlan(statement sqlparser.Statement) (*Plan, error) {
 func (r *Router) buildSelectPlan(statement sqlparser.Statement) (*Plan, error) {
 	plan := &Plan{}
 	var where *sqlparser.Where
+	var err error
 	var tableName string
+
 	stmt := statement.(*sqlparser.Select)
 	switch v := (stmt.From[0]).(type) {
 	case *sqlparser.AliasedTableExpr:
@@ -243,18 +245,19 @@ func (r *Router) buildSelectPlan(statement sqlparser.Statement) (*Plan, error) {
 
 	plan.Rule = r.GetRule(tableName) //根据表名获得分表规则
 	where = stmt.Where
+	plan.TableIndexs = makeList(0, len(plan.Rule.TableToNode))
 
 	if where != nil {
 		plan.Criteria = where.Expr //路由条件
+		err = plan.calRouteIndexs()
+		if err != nil {
+			golog.Error("Route", "BuildSelectPlan", err.Error(), 0)
+			return nil, err
+		}
 	} else {
-		plan.Rule = r.DefaultRule
-	}
-	plan.TableIndexs = makeList(0, len(plan.Rule.TableToNode))
-
-	err := plan.calRouteIndexs()
-	if err != nil {
-		golog.Error("Route", "BuildSelectPlan", err.Error(), 0)
-		return nil, err
+		//if shard select without where,send to all nodes and all tables
+		plan.RouteTableIndexs = plan.TableIndexs
+		plan.RouteNodeIndexs = makeList(0, len(plan.Rule.Nodes))
 	}
 
 	if plan.Rule.Type != DefaultRuleType && len(plan.RouteTableIndexs) == 0 {
@@ -275,8 +278,18 @@ func (r *Router) buildInsertPlan(statement sqlparser.Statement) (*Plan, error) {
 	if _, ok := stmt.Rows.(sqlparser.SelectStatement); ok {
 		return nil, errors.ErrSelectInInsert
 	}
+
+	if stmt.Columns == nil {
+		return nil, errors.ErrIRNoColumns
+	}
+
 	//根据sql语句的表，获得对应的分片规则
 	plan.Rule = r.GetRule(sqlparser.String(stmt.Table))
+
+	err := plan.GetIRKeyIndex(stmt.Columns)
+	if err != nil {
+		return nil, err
+	}
 
 	if stmt.OnDup != nil {
 		err := plan.Rule.checkUpdateExprs(sqlparser.UpdateExprs(stmt.OnDup))
@@ -288,7 +301,7 @@ func (r *Router) buildInsertPlan(statement sqlparser.Statement) (*Plan, error) {
 	plan.Criteria = plan.checkValuesType(stmt.Rows.(sqlparser.Values))
 	plan.TableIndexs = makeList(0, len(plan.Rule.TableToNode))
 
-	err := plan.calRouteIndexs()
+	err = plan.calRouteIndexs()
 	if err != nil {
 		golog.Error("Route", "BuildInsertPlan", err.Error(), 0)
 		return nil, err
@@ -381,12 +394,22 @@ func (r *Router) buildReplacePlan(statement sqlparser.Statement) (*Plan, error) 
 		panic(sqlparser.NewParserError("select in replace not allowed"))
 	}
 
+	if stmt.Columns == nil {
+		return nil, errors.ErrIRNoColumns
+	}
+
 	plan.Rule = r.GetRule(sqlparser.String(stmt.Table))
+
+	err := plan.GetIRKeyIndex(stmt.Columns)
+	if err != nil {
+		return nil, err
+	}
+
 	plan.Criteria = plan.checkValuesType(stmt.Rows.(sqlparser.Values))
 
 	plan.TableIndexs = makeList(0, len(plan.Rule.TableToNode))
 
-	err := plan.calRouteIndexs()
+	err = plan.calRouteIndexs()
 	if err != nil {
 		golog.Error("Route", "BuildReplacePlan", err.Error(), 0)
 		return nil, err
@@ -466,12 +489,11 @@ func (r *Router) generateSelectSql(plan *Plan, stmt sqlparser.Statement) error {
 					plan.RouteTableIndexs[i],
 				)
 			}
-			buf.Fprintf("%v%v%v%v%v%s",
+			buf.Fprintf("%v%v%v%v%s",
 				node.Where,
 				node.GroupBy,
 				node.Having,
 				node.OrderBy,
-				node.Limit,
 				node.Lock,
 			)
 

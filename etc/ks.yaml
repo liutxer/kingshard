@@ -35,7 +35,7 @@ nodes :
 
     # slave represents a real mysql salve server,and the number after '@' is 
     # read load weight of this slave.
-    slave : 
+    #slave : 192.168.59.101:3307@2,192.168.59.101:3307@3
     down_after_noalive : 32
 - 
     name : node2 
@@ -57,7 +57,7 @@ nodes :
     # 0 will no down
     down_after_noalive: 32
 
-# schema defines which db can be used by client and this db's sql will be executed in which nodes
+# schema defines which db can be used by client and this db's sql will be executed in which nodes, the db is also the default database
 schema :
     db : kingshard
     nodes: [node1,node2]
